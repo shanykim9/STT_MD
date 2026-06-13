@@ -1,0 +1,7 @@
+streamlit
+requests
+python-dotenv
+pymupdf
+llama-parse
+nest_asyncio
+anthropic
