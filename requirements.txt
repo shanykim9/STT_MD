@@ -5,3 +5,7 @@ pymupdf
 llama-parse
 nest_asyncio
 anthropic
+openai
+python-docx
+markdown
+htmldocx

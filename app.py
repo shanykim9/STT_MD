@@ -6,6 +6,14 @@ import requests
 import re
 import fitz  # PyMuPDF
 from dotenv import load_dotenv
+import glob
+from openai import OpenAI
+import io
+
+# 마크다운 -> 워드 변환용 패키지
+import markdown
+from docx import Document
+from htmldocx import HtmlToDocx
 
 # LlamaParse 패키지 및 비동기 방어
 from llama_parse import LlamaParse
@@ -18,252 +26,404 @@ import anthropic
 # .env 파일 로드
 load_dotenv()
 
-# 웹 브라우저 탭 및 레이아웃 설정 (더 넓게 보기 위해 wide 모드 적용)
+# 웹 브라우저 탭 및 레이아웃 설정
 st.set_page_config(page_title="AI 종합 데이터 변환 및 분석 툴", page_icon="🛠️", layout="wide")
 
 st.title("🛠️ AI 종합 데이터 변환 및 분석 툴")
-st.markdown("영상 음성 추출, 고품질 PDF 복원, 그리고 **Claude 3.5 Sonnet 기반의 주식 강의 심층 교차 분석**을 통합 제공합니다.")
+st.markdown("영상 음성 추출, 고품질 PDF 복원, 그리고 **Claude 기반의 주식 강의 심층 교차 분석(다중 파일 및 워드 다운로드 지원)**을 통합 제공합니다.")
 
-# 상단 3개 탭 구성
-tab1, tab2, tab3 = st.tabs(["🎥 영상 -> TXT 변환", "📄 PDF -> MD 변환 (LlamaParse)", "🧠 AI 강의 종합 분석 (Claude 3.5)"])
+tab1, tab2, tab3 = st.tabs(["🎥 영상 -> TXT 변환", "📄 PDF -> MD 변환 (LlamaParse)", "🧠 AI 강의 종합 분석 (3단계 세분할)"])
 
 # ==========================================
-# 탭 1: 영상 음성 텍스트 변환 (Deepgram)
+# 탭 1: 영상 음성 텍스트 변환 (OpenAI Whisper / 다중 파일 업로드)
 # ==========================================
 with tab1:
-    st.header("🎥 영상 음성 -> 텍스트 변환")
-    # (이전 코드와 완벽히 동일하여 생략 없이 전체 유지)
-    api_key = os.getenv("DEEPGRAM_API_KEY")
-    if not api_key:
-        api_key = st.text_input("Deepgram API Key:", type="password", key="vid_key")
+    st.header("🎥 영상 음성 -> 텍스트 일괄 변환 (OpenAI Whisper)")
+    st.markdown("네트워크 오류가 없는 가장 안정적인 **OpenAI Whisper API**를 사용합니다. 여러 영상을 한 번에 업로드할 수 있습니다.")
+    
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not openai_api_key:
+        openai_api_key = st.text_input("OpenAI API Key를 입력하세요:", type="password", key="vid_key").strip()
         
-    video_path_input = st.text_input("영상 파일의 절대 경로를 입력하세요:", placeholder="예: C:\\Users\\Username\\Videos\\Seo_260526.mp4")
+    uploaded_videos = st.file_uploader("영상 파일들을 업로드하세요:", type=["mp4", "mkv", "avi", "mov"], accept_multiple_files=True, key="vid_upload")
 
-    if st.button("🚀 영상 변환 시작", key="btn_vid"):
-        video_path = video_path_input.strip('"').strip("'")
-        if not api_key or not video_path or not os.path.exists(video_path):
-            st.error("API 키와 올바른 영상 경로를 확인해 주세요.")
+    if st.button("🚀 안정적인 영상 일괄 변환 시작", key="btn_vid"):
+        if not openai_api_key:
+            st.error("API 키가 필요합니다.")
+        elif not uploaded_videos:
+            st.error("영상 파일을 하나 이상 업로드해 주세요.")
         else:
-            audio_path = ""
-            base_filename = os.path.splitext(os.path.basename(video_path))[0]
-            output_txt_filename = f"{base_filename}_변환.txt"
-
             try:
-                duration_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
-                total_duration = float(subprocess.run(duration_cmd, stdout=subprocess.PIPE, text=True).stdout.strip())
-
-                st.write("### ⏳ 오디오 추출 진행 상태")
-                progress_text = st.empty()
-                progress_bar = st.progress(0.0)
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_aud:
-                    audio_path = tmp_aud.name
+                client = OpenAI(api_key=openai_api_key)
+                total_combined_transcript = ""
                 
-                command = ["ffmpeg", "-y", "-i", video_path, "-vn", "-acodec", "libmp3lame", "-q:a", "2", audio_path]
-                process = subprocess.Popen(command, stderr=subprocess.PIPE, universal_newlines=True, encoding='utf-8')
-                
-                time_regex = re.compile(r"time=(\d{2}):(\d{2}):(\d{2}\.\d{2})")
-                for line in process.stderr:
-                    match = time_regex.search(line)
-                    if match:
-                        h, m, s = match.groups()
-                        current_time = int(h) * 3600 + int(m) * 60 + float(s)
-                        percent = min(1.0, current_time / total_duration)
-                        progress_bar.progress(percent)
-                        progress_text.text(f"1단계: 영상에서 오디오 추출 중... ({int(percent * 100)}%)")
-                
-                process.wait()
-                progress_bar.progress(1.0)
-                progress_text.text("1단계 완료")
-
-                with st.spinner("2단계: AI가 음성을 텍스트로 변환 중입니다..."):
-                    url = "https://api.deepgram.com/v1/listen?model=nova-2&language=ko&smart_format=true"
-                    headers = {"Authorization": f"Token {api_key}", "Content-Type": "audio/mp3"}
-                    with open(audio_path, "rb") as audio_file:
-                        response = requests.post(url, headers=headers, data=audio_file)
+                for v_idx, video_file in enumerate(uploaded_videos):
+                    st.write(f"### 🎬 [{v_idx+1}/{len(uploaded_videos)}] '{video_file.name}' 처리 중...")
                     
-                    if response.status_code == 200:
-                        transcript = response.json()['results']['channels'][0]['alternatives'][0]['transcript']
-                        st.success("✅ 영상 텍스트 변환 완료!")
-                        st.text_area("영상 변환 결과", transcript, height=250)
-                        st.download_button("📄 텍스트 다운로드", transcript, file_name=output_txt_filename, mime="text/plain")
-                    else:
-                        st.error(f"오류: {response.status_code}")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(video_file.name)[1]) as tmp_vid:
+                        tmp_vid.write(video_file.read())
+                        video_path = tmp_vid.name
+
+                    duration_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
+                    total_duration = float(subprocess.run(duration_cmd, stdout=subprocess.PIPE, text=True).stdout.strip())
+
+                    progress_text = st.empty()
+                    progress_bar = st.progress(0.0)
+
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        chunk_pattern = os.path.join(temp_dir, "chunk_%03d.mp3")
+                        
+                        command = [
+                            "ffmpeg", "-y", "-i", video_path, "-vn", 
+                            "-acodec", "libmp3lame", "-ac", "1", "-ar", "16000", "-b:a", "32k",
+                            "-f", "segment", "-segment_time", "1800", 
+                            chunk_pattern
+                        ]
+                        process = subprocess.Popen(command, stderr=subprocess.PIPE, universal_newlines=True, encoding='utf-8')
+                        
+                        time_regex = re.compile(r"time=(\d{2}):(\d{2}):(\d{2}\.\d{2})")
+                        for line in process.stderr:
+                            match = time_regex.search(line)
+                            if match:
+                                h, m, s = match.groups()
+                                current_time = int(h) * 3600 + int(m) * 60 + float(s)
+                                percent = min(1.0, current_time / total_duration)
+                                progress_bar.progress(percent)
+                                progress_text.text(f"1단계: 오디오 30분 단위 분할 중... ({int(percent * 100)}%)")
+                        
+                        process.wait()
+                        progress_bar.progress(1.0)
+                        progress_text.text("1단계 완료: 오디오 분할 추출 완료")
+
+                        chunks = sorted(glob.glob(os.path.join(temp_dir, "chunk_*.mp3")))
+                        total_chunks = len(chunks)
+                        
+                        video_transcript = f"=== [{video_file.name}] 변환 결과 ===\n\n"
+                        has_error = False
+
+                        for idx, chunk_file in enumerate(chunks):
+                            progress_text.text(f"2단계: AI 음성 인식 중... (총 {total_chunks}개 조각 중 {idx+1}번째 처리 중 🔄)")
+                            progress_bar.progress(idx / total_chunks)
+                            
+                            try:
+                                with open(chunk_file, "rb") as audio_file:
+                                    transcript = client.audio.transcriptions.create(
+                                        model="whisper-1",
+                                        file=audio_file,
+                                        response_format="text"
+                                    )
+                                video_transcript += transcript + "\n\n"
+                            except Exception as e:
+                                st.error(f"오류: {idx+1}번째 조각 처리 중 에러 발생: {str(e)}")
+                                has_error = True
+                                break
+
+                        if not has_error:
+                            progress_bar.progress(1.0)
+                            progress_text.text(f"✅ '{video_file.name}' 변환 완료!")
+                            total_combined_transcript += video_transcript + "\n\n========================================\n\n"
+                            
+                    os.remove(video_path)
+
+                st.success("✅ 모든 영상의 텍스트 변환이 완료되었습니다!")
+                st.text_area("통합 변환 결과", total_combined_transcript, height=300)
+                st.download_button("📄 통합 텍스트 다운로드", total_combined_transcript, file_name="영상_통합_변환결과.txt", mime="text/plain")
+
             except Exception as e:
                 st.error(f"오류 발생: {str(e)}")
-            finally:
-                if audio_path and os.path.exists(audio_path):
-                    try: os.remove(audio_path)
-                    except: pass
 
 # ==========================================
-# 탭 2: PDF 마크다운 변환 (LlamaParse)
+# 탭 2: PDF 마크다운 변환 (LlamaParse / 다중 파일 업로드)
 # ==========================================
 with tab2:
-    st.header("📄 고품질 PDF -> 마크다운(.md) 변환")
-    llama_api_key = os.getenv("LLAMA_CLOUD_API_KEY")
+    st.header("📄 고품질 PDF -> 마크다운(.md) 일괄 변환")
+    llama_api_key = os.getenv("LLAMA_CLOUD_API_KEY", "").strip()
     if not llama_api_key:
-        llama_api_key = st.text_input("LlamaCloud API Key:", type="password", key="pdf_key")
+        llama_api_key = st.text_input("LlamaCloud API Key:", type="password", key="pdf_key").strip()
 
-    uploaded_pdf = st.file_uploader("변환할 PDF 파일을 업로드하세요:", type=["pdf"], key="pdf_upload")
+    uploaded_pdfs = st.file_uploader("변환할 PDF 파일들을 업로드하세요:", type=["pdf"], key="pdf_upload", accept_multiple_files=True)
 
-    if st.button("🚀 고품질 PDF 변환 시작", key="btn_pdf"):
-        if not llama_api_key or not uploaded_pdf:
-            st.error("API Key와 PDF 파일이 필요합니다.")
+    if st.button("🚀 고품질 PDF 일괄 변환 시작", key="btn_pdf"):
+        if not llama_api_key or not uploaded_pdfs:
+            st.error("API Key와 PDF 파일이 최소 1개 이상 필요합니다.")
         else:
             try:
-                pdf_base_name = os.path.splitext(uploaded_pdf.name)[0]
-                output_md_filename = f"{pdf_base_name}_변환.md"
-                
-                doc = fitz.open(stream=uploaded_pdf.read(), filetype="pdf")
-                total_pages = len(doc)
-
-                st.write("### ⏳ 문서 분석 진행 상태")
-                progress_text = st.empty()
-                progress_bar = st.progress(0.0)
-                
-                full_markdown = ""
                 parser = LlamaParse(api_key=llama_api_key, result_type="markdown", verbose=False)
+                total_combined_markdown = ""
 
-                for i in range(total_pages):
-                    current_page = i + 1
-                    progress_text.text(f"LlamaParse 분석 중... ({current_page}/{total_pages} 페이지)")
+                for p_idx, pdf_file in enumerate(uploaded_pdfs):
+                    st.write(f"### 📄 [{p_idx+1}/{len(uploaded_pdfs)}] '{pdf_file.name}' 분석 중...")
                     
-                    page_doc = fitz.open()
-                    page_doc.insert_pdf(doc, from_page=i, to_page=i)
-                    
-                    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-                    tmp_page_path = tmp_file.name
-                    tmp_file.close() 
-                    
-                    page_doc.save(tmp_page_path)
-                    page_doc.close()
-                    
-                    parsed_docs = parser.load_data(tmp_page_path)
-                    if parsed_docs:
-                        full_markdown += parsed_docs[0].text + "\n\n"
-                    
-                    try: os.remove(tmp_page_path)
-                    except: pass 
+                    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+                    total_pages = len(doc)
 
-                    progress_bar.progress(current_page / total_pages)
+                    progress_text = st.empty()
+                    progress_bar = st.progress(0.0)
+                    
+                    pdf_markdown = f"# --- [{pdf_file.name}] 변환 결과 ---\n\n"
 
-                progress_text.text("✅ PDF 마크다운 변환 완료!")
-                doc.close()
+                    for i in range(total_pages):
+                        current_page = i + 1
+                        progress_text.text(f"LlamaParse 분석 중... ({current_page}/{total_pages} 페이지)")
+                        
+                        page_doc = fitz.open()
+                        page_doc.insert_pdf(doc, from_page=i, to_page=i)
+                        
+                        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+                        tmp_page_path = tmp_file.name
+                        tmp_file.close() 
+                        
+                        page_doc.save(tmp_page_path)
+                        page_doc.close()
+                        
+                        parsed_docs = parser.load_data(tmp_page_path)
+                        if parsed_docs:
+                            pdf_markdown += parsed_docs[0].text + "\n\n"
+                        
+                        try: os.remove(tmp_page_path)
+                        except: pass 
 
-                st.text_area("변환 결과", full_markdown, height=300)
-                st.download_button("📄 마크다운 다운로드", full_markdown, file_name=output_md_filename, mime="text/markdown")
+                        progress_bar.progress(current_page / total_pages)
+
+                    progress_text.text(f"✅ '{pdf_file.name}' 마크다운 변환 완료!")
+                    doc.close()
+                    
+                    total_combined_markdown += pdf_markdown + "\n\n"
+
+                st.success("✅ 모든 PDF 파일의 마크다운 변환이 완료되었습니다!")
+                st.text_area("통합 변환 결과", total_combined_markdown, height=300)
+                st.download_button("📄 통합 마크다운 다운로드", total_combined_markdown, file_name="PDF_통합_변환결과.md", mime="text/markdown")
+                
             except Exception as e:
                 st.error(f"오류 발생: {str(e)}")
 
 # ==========================================
-# 탭 3: AI 종합 분석 (Claude 3.5 Sonnet)
+# 탭 3: AI 종합 분석 (3단계 세분할 / 워드 다운로드 기능 추가)
 # ==========================================
 with tab3:
-    st.header("🧠 주식 강의 심층 교차 분석 (Claude 3.5 Sonnet)")
-    st.markdown("교재(MD/PDF)와 강사 녹취록(TXT)을 업로드하면, 지정된 5가지 룰에 따라 AI가 완벽한 맞춤형 요약 리포트를 작성합니다.")
+    st.header("🧠 주식 강의 무제한 심층 분석 (다중 문서 및 워드 추출 지원)")
+    st.markdown("여러 개의 교재와 녹취록을 업로드하면, AI가 모든 자료를 취합하여 분석한 후 **워드 문서(.docx)** 또는 마크다운 파일로 제공합니다.")
 
-    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not anthropic_api_key:
-        st.warning("⚠️ .env 파일에 ANTHROPIC_API_KEY가 설정되지 않았습니다.")
-        anthropic_api_key = st.text_input("Anthropic API Key를 입력하세요:", type="password", key="claude_key")
-    else:
-        st.success("✅ .env 파일에서 Anthropic API Key를 성공적으로 불러왔습니다.")
+        anthropic_api_key = st.text_input("Anthropic API Key를 입력하세요:", type="password", key="claude_key").strip()
 
-    # 두 개의 파일을 나란히 업로드하도록 화면 분할
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("1. 교재 / 강의자료")
-        material_file = st.file_uploader("교재 업로드 (MD 또는 PDF 지원)", type=["md", "pdf"])
-    with col2:
-        st.subheader("2. 강사 녹취록")
-        transcript_file = st.file_uploader("녹취록 업로드 (TXT 파일)", type=["txt"])
+    # --- 1. 화면 내 지침(Rule) 편집 영역 ---
+    default_rules = """[주식 강의 교차 분석 및 맞춤형 요약 시스템 Rule / Skill]
 
-    if st.button("🚀 AI 교차 분석 시작 (리포트 생성)", type="primary"):
-        if not anthropic_api_key:
-            st.error("Anthropic API Key가 필요합니다.")
-        elif not material_file or not transcript_file:
-            st.error("교재 파일과 녹취록 파일을 모두 업로드해 주세요.")
-        else:
-            try:
-                with st.spinner("파일 텍스트 추출 중..."):
-                    # 1. 교재 자료 텍스트 추출
-                    material_text = ""
-                    if material_file.name.endswith(".pdf"):
-                        # PDF일 경우 PyMuPDF로 단순 텍스트 추출 (표/이미지는 제외된 기본 텍스트)
-                        doc = fitz.open(stream=material_file.read(), filetype="pdf")
-                        for page in doc:
-                            material_text += page.get_text() + "\n"
-                        doc.close()
-                    else:
-                        # MD 파일일 경우 그대로 디코딩
-                        material_text = material_file.read().decode("utf-8")
-                    
-                    # 2. 녹취록 텍스트 추출
-                    transcript_text = transcript_file.read().decode("utf-8")
+지금 주식 강의 교재 파일(들)과 녹취록 파일(들)을 업로드합니다. 
+이 자료들을 모두 교차 검증하여, 아래의 5가지 지침과 출력 형식에 맞춰 핵심 내용을 빠짐없이 심층 정리해 주세요.
 
-                with st.spinner("Claude 3.5 Sonnet이 자료를 교차 검증하며 심층 분석 리포트를 작성 중입니다... (약 30초~1분 소요)"):
-                    
-                    # 선생님께서 제공해주신 '분석 지침(Rule)'을 시스템 프롬프트로 완벽히 이식
-                    system_prompt = """당신은 세계 최고의 주식 강의 분석가이자 투자 전략가입니다.
-제공되는 2개의 자료(주식 강의 교재와 해당 강의의 녹취록)를 교차 검증하여, 아래의 5가지 지침과 출력 형식에 맞춰 핵심 내용을 빠짐없이 심층 정리해 주세요.
-
-[분석 및 출력 지침]
-1. 종합 핵심 브리핑 (유연한 핵심 포인트 도출 및 상세 서술):
-- 교재의 목차 흐름을 기본 뼈대로 하되, 강사가 녹취록에서 특별히 시간을 많이 할애하여 열변을 토하거나 중요하다고 강조한 내용을 최우선 순위로 삼아 이번 주 최우선 핵심 포인트를 도출해 주세요.
-- 핵심 포인트 개수는 기본 3가지로 하되, 강사가 강조한 내용이 많을 경우 5가지 혹은 그 이상으로 유연하게 모두 정리해 주세요. (강조된 부분이 적다면 1~2가지도 무방함)
-- (중요) 단순하고 짧은 요약을 지양하고, 강사가 강조한 핵심 배경과 이유를 충분히 이해할 수 있도록 상세하고 깊이 있게 서술해 주세요.
+**[분석 및 출력 지침]**
+1. 종합 핵심 브리핑 (유연한 핵심 포인트 도출 및 요약 서술):
+- 교재(PDF/MD)의 목차 흐름을 기본 뼈대로 하되, 강사가 녹취록(TXT)에서 특별히 시간을 많이 할애하여 열변을 토하거나 중요하다고 강조한 내용을 최우선 순위로 삼아 이번 주 최우선 핵심 포인트를 도출해 주세요.
+- 핵심 포인트 개수는 기본 3가지로 하되, 강사가 강조한 내용이 많을 경우 5가지 혹은 그 이상으로 유연하게 모두 정리해 주세요. (적다면 1~2가지도 좋습니다.)
+- (중요) 단순하고 짧은 요약을 지양하고, 강사가 강조한 핵심 배경과 이유를 이해할 수 있도록 요약해서 서술해 주세요.
 
 2. 교재 + 강사의 추가 인사이트 결합:
-- 교재에 있는 딱딱한 전문 용어나 개념 중, 강사가 녹취록에서 초보자도 이해하기 쉽게 비유를 들었거나 부연 설명한 부분을 적극적으로 찾아내어 그 설명 방식을 그대로 반영해 상세히 정리해 주세요.
+- 교재에 있는 딱딱한 전문 용어나 개념 중, 강사가 녹취록에서 초보자도 이해하기 쉽게 비유를 들었거나 부연 설명한 부분을 적극적으로 찾아내어 그 설명 방식을 그대로 반영해 요약해서 정리해 주세요.
 
 3. [강사 특별 코멘트] 섹션 분리:
-- 교재에는 명시되어 있지 않으나 강사가 강의 중에 추가로 언급한 시장의 최신 동향, 거시경제(매크로) 노이즈에 대한 경고, 특정 섹터에 대한 개인적인 견해 및 주의사항이 있다면 '[강사 특별 코멘트]'라는 제목 아래 별도로 눈에 띄게 정리해 주세요. 이 부분 역시 배경 설명을 생략하지 말고 충분히 기재해 주세요.
+- 교재에는 명시되어 있지 않으나 강사가 강의 중에 추가로 언급한 시장의 최신 동향, 거시경제(매크로) 노이즈에 대한 경고, 특정 섹터에 대한 개인적인 견해 및 주의사항이 있다면 [강사 특별 코멘트]라는 제목 아래 별도로 눈에 띄게 정리해 주세요. 배경 설명을 생략하지 말고 요약해서 기재해 주세요.
 
-4. 종목별 심층 뷰(View) 및 밸류에이션 정리 (모든 종목 포함 및 상세 서술):
-- 교재에 기술된 종목 순서를 기준으로 하여, 교재에 언급된 '모든 종목'에 대해 다음 3가지 요소를 반드시 포함해 종목별로 정리해 주세요. 
-(단, 강사가 "통째로 지나갑니다" 등으로 생략하거나 별다른 언급 없이 넘어간 종목의 경우에도 절대 제외하지 말고, '통째로 생략됨' 또는 '별다른 언급 없이 넘어감'이라고 명확히 기재하여 모든 종목을 빠짐없이 정리해 주세요.)
-- (중요) 출력물이 많아지더라도 각 종목의 주요 핵심과 관련 배경들을 절대 간략하게 생략하지 마세요. 강사가 언급한 상세한 모멘텀, 이슈, 매매 뷰의 이유를 풍부하고 깊이 있게 작성해야 합니다.
-  A. 음성(TXT)에서 추가로 강조된 해당 종목의 핵심 모멘텀 및 이슈 (단편적인 요약 금지, 상세한 배경 포함. 생략된 경우 해당 사실 기재)
+4. 종목별 심층 뷰(View) 및 밸류에이션 정리 (선택과 집중):
+- 교재에 언급된 모든 종목을 다루되, 강사가 가장 강조한 상위 5~7개(강조한 내용이 많을 경우 5~7가지 이상으로 유연하게 모두 정리해 주세요. 적다면 1~2가지도 좋습니다.)
+ 핵심 종목만 아래 3가지 요소(A, B, C)를 포함하여 깊이 있게 작성해 주세요.
+  A. 음성(TXT)에서 추가로 강조된 해당 종목의 핵심 모멘텀 및 이슈 (생략된 경우 해당 사실 기재)
   B. 해당 종목의 PER 수치 (교재와 녹취록에 언급된 수치 모두 기재, 없으면 '언급 없음' 기재)
-  C. 담쌤(강사)의 명확한 매매 뷰 (예: 적극 분할 매수, 눌림목 대기, 관망, 밸류에이션 고평가로 인한 패스 등. 언급이 없는 경우 '뷰 부재 및 패스' 기재)와 그렇게 판단한 구체적인 이유 서술.
+  C. 담쌤(강사)의 명확한 매매 뷰 (예: 적극 분할 매수, 눌림목 대기, 관망 등)와 판단한 구체적인 이유 서술.
+- 나머지 단순 언급되거나 패스한 종목들은 글자 수(토큰) 확보를 위해 서술형이 아닌 '요약 표(Table)' 형식(종목명, PER, 매매 뷰 3가지 컬럼)으로 압축해서 한 번에 정리해 주세요.
 
 5. 실전 적용 포인트:
 - 종합된 분석 내용을 바탕으로, 투자자가 이번 주 실전 투자나 추가 공부 시 가장 집중해야 할 구체적인 전략이나 결론을 2~3가지 요약해 주세요.
-- 담쌤(강사)의 강의한 알짜를 맨 먼저 기재하고, 각 종목별 매매뷰를 간략히 핵심만 요약해서 정리해주세요. (예: '26년 6월 1일(강의일), 삼성전자 적극매수, SK하이닉스 적극매수, 삼성전기 조정기다림, SK텔레콤 조금씩 매수' 등)"""
+- 담쌤(강사)의 강의한 알짜를 맨 먼저 기재하고, 각 종목별 매매뷰를 간략히 핵심만 요약해서 표로 정리해주세요. (예: '26년 6월 1일(강의일), 삼성전자 적극매수, SK하이닉스 적극매수, 삼성전기 조정기다림 등')"""
 
-                    # 사용자 데이터 세팅
-                    user_message = f"다음 두 자료를 바탕으로 지침에 맞게 분석 리포트를 작성해 주세요.\n\n<교재_자료>\n{material_text}\n</교재_자료>\n\n<강사_녹취록>\n{transcript_text}\n</강사_녹취록>"
+    st.subheader("⚙️ AI 분석 지침 (프롬프트)")
+    user_rules = st.text_area("이 지침을 바탕으로 AI가 모든 문서를 교차 검증합니다:", value=default_rules, height=350)
+    st.markdown("---")
 
-                    # Claude 3.5 Sonnet API 호출
-                    client = anthropic.Anthropic(api_key=anthropic_api_key)
-                    response = client.messages.create(
-                        model="claude-sonnet-4-6",
-                        max_tokens=8192,  # 상세 서술을 위해 최대 출력 토큰 확보
-                        temperature=0.3,  # 분석의 정확성을 위해 창의성(온도)을 낮춤
-                        system=system_prompt,
-                        messages=[
-                            {"role": "user", "content": user_message}
-                        ]
-                    )
+    # --- 2. 데이터 업로드 영역 (다중 업로드 허용) ---
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("📁 1. 교재 / 강의자료")
+        material_files = st.file_uploader("교재 업로드 (다중 선택 가능, MD 또는 PDF)", type=["md", "pdf"], accept_multiple_files=True)
+    with col2:
+        st.subheader("📁 2. 강사 녹취록")
+        transcript_files = st.file_uploader("녹취록 업로드 (다중 선택 가능, TXT)", type=["txt"], accept_multiple_files=True)
 
-                    analysis_result = response.content[0].text
-
-                    st.success("✅ 맞춤형 심층 분석 리포트가 완성되었습니다!")
+    if st.button("🚀 취합된 자료로 3단계 세분할 분석 시작", type="primary"):
+        if not anthropic_api_key:
+            st.error("Anthropic API Key가 필요합니다.")
+        elif not material_files or not transcript_files:
+            st.error("교재 파일과 녹취록 파일을 각각 하나 이상 업로드해 주세요.")
+        else:
+            try:
+                with st.spinner("모든 파일의 텍스트를 하나로 취합하는 중입니다..."):
+                    material_text = ""
+                    for m_file in material_files:
+                        material_text += f"\n\n--- [교재 자료: {m_file.name}] ---\n\n"
+                        if m_file.name.endswith(".pdf"):
+                            doc = fitz.open(stream=m_file.read(), filetype="pdf")
+                            for page in doc:
+                                material_text += page.get_text() + "\n"
+                            doc.close()
+                        else:
+                            material_text += m_file.read().decode("utf-8")
                     
-                    # 결과를 마크다운 형태로 예쁘게 출력
-                    st.markdown("---")
-                    st.markdown(analysis_result)
-                    st.markdown("---")
+                    transcript_text = ""
+                    for t_file in transcript_files:
+                        transcript_text += f"\n\n--- [강사 녹취록: {t_file.name}] ---\n\n"
+                        transcript_text += t_file.read().decode("utf-8")
 
-                    # 파일 다운로드 제공
-                    report_filename = "주식강의_심층분석_리포트.md"
+                client = anthropic.Anthropic(api_key=anthropic_api_key)
+                
+                st.markdown("### 📊 분석 결과 리포트")
+                st.markdown("---")
+                part1_container = st.empty()
+                part2_container = st.empty()
+                part3_container = st.empty()
+                
+                # ==========================================
+                # [1단계 호출] 지침 1, 2, 3 처리
+                # ==========================================
+                with st.spinner("🔄 파트 1 분석 중: 취합된 모든 자료를 바탕으로 지침 1~3번을 작성 중입니다..."):
+                    system_prompt_1 = "당신은 세계 최고의 주식 강의 분석가입니다. 사용자가 제공하는 <instructions> 안의 지침 중 [1번, 2번, 3번]에 해당하는 내용만 완벽하게 작성하십시오. 4번과 5번은 절대 출력하지 마십시오."
+                    
+                    user_message_1 = f"""
+<instructions>
+{user_rules}
+
+[중요 출력 규칙]
+- 답변 생성 시 반드시 지침에 명시된 1, 2, 3번 목차 번호와 제목을 그대로 사용하십시오.
+- 4번과 5번은 이 단계에서 절대로 출력하지 마십시오.
+</instructions>
+
+<material>
+{material_text}
+</material>
+
+<transcript>
+{transcript_text}
+</transcript>
+"""
+                    response_1 = client.messages.create(
+                        model="claude-sonnet-4-6", 
+                        max_tokens=8192,
+                        temperature=0.3,
+                        system=system_prompt_1,
+                        messages=[{"role": "user", "content": user_message_1}]
+                    )
+                    part1_result = response_1.content[0].text
+                    part1_container.markdown(part1_result)
+
+                # ==========================================
+                # [2단계 호출] 지침 4 처리
+                # ==========================================
+                with st.spinner("🔄 파트 2 분석 중: 지침 4번(종목별 심층 뷰)을 집중 분석 중입니다..."):
+                    system_prompt_2 = "당신은 세계 최고의 주식 강의 분석가입니다. 오직 <instructions> 안의 지침 중 [4번]에 해당하는 내용만 집중적으로 작성하십시오."
+                    
+                    user_message_2 = f"""
+<instructions>
+{user_rules}
+
+[중요 출력 규칙]
+- 답변 생성 시 반드시 지침에 명시된 4번 목차 번호와 제목을 그대로 사용하십시오.
+- 오직 4번 지침만 수행하십시오. 1, 2, 3번이나 5번 내용을 출력하지 마십시오.
+</instructions>
+
+<material>
+{material_text}
+</material>
+
+<transcript>
+{transcript_text}
+</transcript>
+"""
+                    response_2 = client.messages.create(
+                        model="claude-sonnet-4-6", 
+                        max_tokens=8192,
+                        temperature=0.3,
+                        system=system_prompt_2,
+                        messages=[{"role": "user", "content": user_message_2}]
+                    )
+                    part2_result = response_2.content[0].text
+                    part2_container.markdown(part2_result)
+
+                # ==========================================
+                # [3단계 호출] 지침 5 처리
+                # ==========================================
+                with st.spinner("🔄 파트 3 분석 중: 지침 5번(실전 적용 포인트 요약)을 마무리 중입니다..."):
+                    system_prompt_3 = "당신은 세계 최고의 주식 강의 분석가입니다. 오직 <instructions> 안의 지침 중 [5번]에 해당하는 내용만 작성하십시오."
+                    
+                    user_message_3 = f"""
+앞서 당신이 작성한 1~4번의 분석 결과와 제공된 원본 데이터를 바탕으로, 마지막 [5번] 지침을 완벽하게 수행하십시오.
+
+<instructions>
+{user_rules}
+
+[중요 출력 규칙]
+- 답변 생성 시 반드시 지침에 명시된 5번 목차 번호와 제목을 그대로 사용하십시오.
+- 오직 5번 지침에 대해서만 답변하십시오. 
+</instructions>
+
+<material>
+{material_text}
+</material>
+
+<transcript>
+{transcript_text}
+</transcript>
+
+<previous_analysis>
+{part1_result}
+{part2_result}
+</previous_analysis>
+"""
+                    response_3 = client.messages.create(
+                        model="claude-sonnet-4-6", 
+                        max_tokens=8192,
+                        temperature=0.3,
+                        system=system_prompt_3,
+                        messages=[{"role": "user", "content": user_message_3}]
+                    )
+                    part3_result = response_3.content[0].text
+                    part3_container.markdown(part3_result)
+
+                st.success("✅ 여러 개의 자료를 바탕으로 한 3단계 심층 분석이 완벽하게 완료되었습니다!")
+                
+                # ==========================================
+                # 파일 다운로드 처리 로직 (Markdown & Word)
+                # ==========================================
+                full_report = part1_result + "\n\n" + part2_result + "\n\n" + part3_result
+                
+                # 워드(.docx) 문서 생성 로직
+                html_content = markdown.markdown(full_report, extensions=['tables'])
+                doc = Document()
+                new_parser = HtmlToDocx()
+                new_parser.add_html_to_document(html_content, doc)
+                
+                doc_io = io.BytesIO()
+                doc.save(doc_io)
+                docx_data = doc_io.getvalue()
+                
+                # 가로로 두 개의 다운로드 버튼 배치
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
                     st.download_button(
-                        label="📥 최종 분석 리포트 다운로드 (.md)",
-                        data=analysis_result,
-                        file_name=report_filename,
+                        label="📥 마크다운 리포트 다운로드 (.md)",
+                        data=full_report,
+                        file_name="주식강의_다중문서_심층분석_리포트.md",
                         mime="text/markdown",
-                        type="primary"
+                        use_container_width=True
+                    )
+                with col_btn2:
+                    st.download_button(
+                        label="📝 워드 문서 리포트 다운로드 (.docx)",
+                        data=docx_data,
+                        file_name="주식강의_다중문서_심층분석_리포트.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        type="primary",
+                        use_container_width=True
                     )
 
             except Exception as e:
