@@ -9,3 +9,5 @@ openai
 python-docx
 markdown
 htmldocx
+yfinance
+pandas
