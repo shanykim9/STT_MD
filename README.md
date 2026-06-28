@@ -25,9 +25,9 @@ streamlit run app2.py
 
 | 탭 | 기능 | 사용 API / 도구 |
 |---|---|---|
-| 🎥 영상 → TXT | 영상 음성을 텍스트로 변환 | OpenAI Whisper API, FFmpeg |
-| 📄 PDF → MD | PDF를 고품질 마크다운으로 변환 | LlamaParse (LlamaCloud), PyMuPDF |
-| 🧠 AI 강의 분석 | 교재 + 녹취록 교차 분석 리포트 생성 | Anthropic Claude Sonnet 4.6 |
+| 🎥 영상 → TXT | 영상 음성을 텍스트로 변환 (다중 파일 일괄 처리) | OpenAI Whisper API, FFmpeg |
+| 📄 PDF → MD | PDF를 고품질 마크다운으로 변환 (다중 파일 일괄 처리) | LlamaParse (LlamaCloud), PyMuPDF |
+| 🧠 AI 강의 분석 | 교재 + 녹취록 교차 분석 리포트 생성 (MD / DOCX) | Anthropic Claude Sonnet 4.6 |
 | 📈 매매 시뮬레이션 | 주차별 매매뷰 기반 포트폴리오 누적 백테스트 | yfinance, python-docx |
 
 ---
@@ -164,14 +164,14 @@ LlamaParse를 사용해 PDF를 페이지 단위로 고품질 마크다운으로 
 
 ### 탭 3: 🧠 AI 강의 종합 분석 (3단계 세분할)
 
-교재(PDF/MD)와 강의 녹취록(TXT)을 교차 검증하여 주식 강의 심층 분석 리포트를 생성합니다.
+여러 교재(PDF/MD)와 강의 녹취록(TXT)을 교차 검증하여 주식 강의 심층 분석 리포트를 생성합니다.
 
 **입력 파일**
 
-| 구분 | 형식 |
-|---|---|
-| 교재 / 강의자료 | `.md` 또는 `.pdf` |
-| 강사 녹취록 | `.txt` |
+| 구분 | 형식 | 개수 |
+|---|---|---|
+| 교재 / 강의자료 | `.md` 또는 `.pdf` | 다중 선택 가능 |
+| 강사 녹취록 | `.txt` | 다중 선택 가능 |
 
 | 버전 | 입력 | 다운로드 형식 |
 |---|---|---|
@@ -193,13 +193,17 @@ Claude API 토큰 제한을 우회하기 위해 3번 나눠 호출합니다.
 |---|---|---|---|
 | 1단계 | 지침 1, 2, 3 | 8,192 | claude-sonnet-4-6 |
 | 2단계 | 지침 4 (종목 분석) | 8,192 | claude-sonnet-4-6 |
-| 3단계 | 지침 5 (실전 포인트) | 8,192 | claude-sonnet-4-6 |
+| 3단계 | 지침 5 (실전 포인트, 1~4단계 결과 참조) | 8,192 | claude-sonnet-4-6 |
 
 각 단계 결과가 실시간으로 화면에 누적 표시됩니다.
 
 **워드 다운로드 (`app.py`, `app2.py`)**
 - 분석 결과 마크다운 → HTML → `.docx` 변환 (`markdown`, `python-docx`, `htmldocx` 사용)
 - 표(table) 형식도 워드 문서에 포함
+
+**출력 파일명**
+- `주식강의_다중문서_심층분석_리포트.md`
+- `주식강의_다중문서_심층분석_리포트.docx`
 
 ---
 
@@ -294,6 +298,8 @@ pandas
 | `markdown`, `python-docx`, `htmldocx` | 탭 3 — 워드 다운로드 (`app.py`, `app2.py`) |
 | `yfinance`, `pandas` | 탭 4 — 매매 시뮬레이션 (`app2.py`) |
 
+> `llama-parse` 패키지는 deprecated 상태입니다. 현재 앱은 정상 동작하지만, 향후 [LlamaCloud 통합 SDK](https://developers.llamaindex.ai/python/cloud/llamaparse/getting_started/)로 마이그레이션을 권장합니다.
+
 ---
 
 ## Streamlit 설정
@@ -322,8 +328,9 @@ maxUploadSize = 3072   # 최대 업로드 3GB (MB 단위)
 
 - **API 비용:** Whisper, LlamaParse, Claude API 모두 사용량에 따라 과금됩니다.
 - **영상 입력 방식:** `app1.py`는 로컬 절대 경로, `app.py`/`app2.py`는 파일 업로드 방식입니다.
-- **긴 영상:** 30분 단위 분할 후 순차 처리하므로 영상 길이에 비례해 시간이 소요됩니다.
-- **PDF 변환:** 페이지별 LlamaParse 호출이므로 페이지 수가 많을수록 API 비용이 증가합니다.
+- **긴 영상:** 30분 단위 분할 후 순차 처리하므로 영상 길이와 파일 수에 비례해 시간이 소요됩니다.
+- **PDF 변환:** 페이지별 LlamaParse 호출이므로 페이지 수가 많을수록 API 호출 횟수와 비용이 증가합니다.
+- **대용량 업로드:** Streamlit 업로드 한도는 3GB로 설정되어 있으나, 실제 처리 시간과 메모리 사용량에 유의하세요.
 - **시뮬레이션:** yfinance 데이터는 지연·누락될 수 있으며, 실제 투자 결과를 보장하지 않습니다.
 - **상태 파일:** `portfolio_state.json`은 로컬 시뮬레이션 데이터입니다. Git에 올릴지 여부는 사용자 판단에 맡깁니다.
 - **API 키 보안:** `.env` 파일을 Git에 커밋하지 마세요.
